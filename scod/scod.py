@@ -1,6 +1,7 @@
 """
 SCOD: Sketching Curvature for OOD Detection
 """
+
 from typing import Optional, Tuple, List
 from copy import deepcopy, copy
 import math
@@ -25,7 +26,7 @@ base_config = {
     "offline_proj_dim": None,  # whether to subsample rows during offline computation
     "online_proj_dim": None,  # whether to project output down before taking gradients at test time
     "online_proj_type": "gaussian",  # how to do output projection
-    "metric_threshold": None, # if not None, expects a float indicating whether to ignore a training point
+    "metric_threshold": None,  # if not None, expects a float indicating whether to ignore a training point
 }
 
 
@@ -48,7 +49,7 @@ class SCOD(nn.Module):
                 Configuration parameters for SCOD. If None, uses default settings. Defaults to None.
                 Valid parameters, and their defaults, are given below:
                     "num_eigs": 10,  # low rank estimate to recover (k)
-                    "num_samples": None,  # sketch size T (T), if None, uses 
+                    "num_samples": None,  # sketch size T (T), if None, uses
                     "prior_type": "scalar",  # options are 'scalar' (isotropic prior), 'per_parameter', 'per_weight'
                     "sketch_type": "gaussian",  # sketch type
                     "offline_proj_dim": None,  # whether to subsample rows during offline computation
@@ -95,7 +96,9 @@ class SCOD(nn.Module):
         # ---------------------------
         # options for prior representation and computation
         self.prior_type = self.config["prior_type"]
-        self.log_prior_scale = nn.Parameter(self._init_log_prior(device), requires_grad=True)
+        self.log_prior_scale = nn.Parameter(
+            self._init_log_prior(device), requires_grad=True
+        )
 
         # --------------------------------
         # options for offline computation
@@ -142,7 +145,7 @@ class SCOD(nn.Module):
 
         self.hyperparameters = [self.log_prior_scale]
 
-    def _init_log_prior(self, device : torch.DeviceObjType) -> torch.Tensor:
+    def _init_log_prior(self, device: torch.DeviceObjType) -> torch.Tensor:
         """Returns intial value of log_prior parameter, depending on self.prior_type
 
         Raises:
@@ -356,7 +359,7 @@ class SCOD(nn.Module):
         print("computing basis")
         if dataloader_kwargs is None:
             dataloader_kwargs = {
-                "num_workers": 4,
+                "num_workers": 0,
             }
             if device.type != "cpu":
                 dataloader_kwargs["pin_memory"] = True
@@ -383,11 +386,15 @@ class SCOD(nn.Module):
                 if self.use_empirical_fisher:
                     # contribution of this datapoint is
                     # C = J_l^T J_l, where J_l = d(-log p(y | x))/dw
-                    pre_jac_factor = -dist_layer.validated_log_prob(z, labels)  # shape [1]
+                    pre_jac_factor = -dist_layer.validated_log_prob(
+                        z, labels
+                    )  # shape [1]
                 else:
                     # contribution of this datapoint is
                     # C = J_f^T L L^T J
+                    # print("z shape:", z.shape)
                     Lt_z = dist_layer.apply_sqrt_F(z).mean(dim=0)  # L^\T theta
+                    # print("Lt_z shape:", Lt_z.shape)
                     # flatten
                     pre_jac_factor = Lt_z.view(-1)  # shape [prod(event_shape)]
 
@@ -407,19 +414,22 @@ class SCOD(nn.Module):
         del sqrt_C_T  # free memory @TODO: sketch could take output tensors to populate directly
         eigs, eigvs = sketch.eigs()
         del sketch
-        self.GGN_eigs.data = torch.clamp_min( eigs[-self.num_eigs:], min=torch.zeros(1)).to(device)
-        self.GGN_basis.data = eigvs[:,-self.num_eigs:].to(device)
+        self.GGN_eigs.data = torch.clamp_min(
+            eigs[-self.num_eigs :], min=torch.zeros(1)
+        ).to(device)
+        self.GGN_basis.data = eigvs[:, -self.num_eigs :].to(device)
         self.GGN_sqrt_prior.data = copy(self.sqrt_prior)
         self.GGN_is_aligned = True
 
         self.configured.data = torch.ones(1, dtype=torch.bool)
 
-    def local_kl_div(self, 
+    def local_kl_div(
+        self,
         inputs: torch.Tensor,
         dist_layer: DistributionLayer,
         use_prior: bool = False,
         n_eigs: Optional[int] = None,
-        prior_multiplier: float = 1.,
+        prior_multiplier: float = 1.0,
     ) -> torch.Tensor:
         """
         Outputs E_{w \sim p(w | D)}[ KL(p(w), p(w^*)) ],
@@ -442,24 +452,22 @@ class SCOD(nn.Module):
         basis = self.GGN_basis[:, -n_eigs:]
         eigs = torch.clamp(self.GGN_eigs[-n_eigs:], min=0.0)
 
-        scaling = torch.sqrt( eigs / (eigs + 1.0) )
+        scaling = torch.sqrt(eigs / (eigs + 1.0))
 
         N = inputs.shape[0]  # batch size
 
         z_mean = self.model(inputs)  # batch of outputs
         Lt_z = dist_layer.apply_sqrt_F(z_mean)
-        flat_Ltz = Lt_z.view(N, -1) # batch of flattened fisher scaled outputs        
+        flat_Ltz = Lt_z.view(N, -1)  # batch of flattened fisher scaled outputs
 
         kl_divs = []
         for j in range(N):
-            Lt_Jj = self._get_weight_jacobian(
-                flat_Ltz[j, :], scaled_by_prior=True
-            )
-            
-            pos_term = (Lt_Jj**2).sum()
-            neg_term = ( ( (Lt_Jj @ basis) * scaling[None,:] )**2 ).sum()
+            Lt_Jj = self._get_weight_jacobian(flat_Ltz[j, :], scaled_by_prior=True)
 
-            kl_divs.append( pos_term - neg_term )
+            pos_term = (Lt_Jj**2).sum()
+            neg_term = (((Lt_Jj @ basis) * scaling[None, :]) ** 2).sum()
+
+            kl_divs.append(pos_term - neg_term)
 
         kl_divs = torch.stack(kl_divs)
 
@@ -472,7 +480,7 @@ class SCOD(nn.Module):
         inputs: torch.Tensor,
         use_prior: bool = False,
         n_eigs: Optional[int] = None,
-        prior_multiplier: float = 1.,
+        prior_multiplier: float = 1.0,
         T: Optional[int] = None,
     ) -> Tuple[List[torch.distributions.Distribution], torch.Tensor]:
         """
@@ -498,7 +506,7 @@ class SCOD(nn.Module):
             n_eigs = self.num_eigs
 
         N = inputs.shape[0]  # batch size
-        device = inputs.device # used to ensure compatibility of constructed tensors
+        device = inputs.device  # used to ensure compatibility of constructed tensors
 
         z_mean = self.model(inputs)  # batch of outputs
         flat_z = z_mean.view(N, -1)  # batch of flattened outputs
@@ -538,7 +546,9 @@ class SCOD(nn.Module):
 
 
 class OodDetector(nn.Module):
-    def __init__(self, scod_model : SCOD, dist_layer : DistributionLayer, metric : str = "entropy"):
+    def __init__(
+        self, scod_model: SCOD, dist_layer: DistributionLayer, metric: str = "entropy"
+    ):
         super().__init__()
         self.scod_model = scod_model
         self.metric = metric
@@ -556,7 +566,7 @@ class OodDetector(nn.Module):
         z_mean, z_var = self.scod_model(x)
         return z_var.view(z_var.shape[0], -1).sum(-1)
 
-    def forward(self, x : torch.Tensor):
+    def forward(self, x: torch.Tensor):
         if self.metric == "entropy":
             return self._entropy_signal(x)
         elif self.metric == "local_kl":
